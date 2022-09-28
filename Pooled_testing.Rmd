@@ -1,0 +1,183 @@
+---
+title: "Pooled testing"
+author: "Alexander V. Alekseyenko"
+date: "5/26/2020"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+
+Suppose we have to screen N subjects with K testing capacity (K<=N). Also suppose for each subject 1,..., N we have (prior) estimates of them being positive, p_1, ..., p_N. Likewise, assume that up to 30 subjects can be pooled together without loss of sensitivity. See: https://www.thelancet.com/journals/laninf/article/PIIS1473-3099(20)30362-5/fulltext.
+
+Probability that a pool of M subjects contains at least one positive is $\mathcal{P}_M(p_1,\ldots,p_M) = 1-\prod_i=1^M (1-p_i)$. Note that $1-(1-min(p_1,\ldots, p_M))^M \leq \mathcal{P}_M(p_1,\ldots, p_M) \leq 1-(1-max(p_1,\ldots, p_M))^M$.
+
+```{r}
+pool_positive = function(probs){
+  1 - prod(1-probs)
+}
+```
+
+Assuming that each sample in a pool is to be re-tested if the entire pool tests positive. 
+The expected number of unit tests to screen M (M>1) samples is 
+$\mathcal{E}_M(p_1,\ldots,p_M) = \\ (1-\mathcal{P}_M(p_1,\ldots,p_M)) + \mathcal{P}_M(p_1,\ldots,p_M)(1+M) = \\ 1+M\mathcal{P}_M(p_1,\ldots,p_M)$.
+
+```{r}
+expected_tests = function(probs){
+  1+pool_positive(probs)*length(probs)
+}
+```
+
+
+Note other strategies a possible here. For example, if a pool tests positive it can be sub-pooled into several smaller size pools. This may provide additional efficiency, but may have larger time requirements, so this is not considered here right now.
+
+Example:
+
+Compute the probabilities and the number of tests.
+```{r}
+ps = seq(from=0.005, to=0.27, by=0.01)
+ns = 2:20
+res= c()
+for(p in ps){
+  res = rbind(res,
+              c(p, 1, p, 1))
+  for(n in ns){
+    res = rbind(res,
+                c(p, n, pool_positive(rep(p,n)), expected_tests(rep(p,n))))
+  }
+}
+res = as.data.frame(res)
+colnames(res) = c("prob_positive", "pool_size", "pool_positive", "expected_tests")
+```
+
+Capacity gain is defined as the ratio between the samples needed to be tested and the expected number of tests using the pooling strategy.
+
+```{r}
+res$best = F
+res$capacity_gain = res$pool_size/res$expected_tests
+for(p in ps){
+  res[res$prob_positive ==p,]$best = 
+    (res[res$prob_positive ==p, ]$capacity_gain == max(subset(res, prob_positive==p)$capacity_gain))
+}
+```
+
+```{r}
+library(ggplot2)
+library(reshape2)
+```
+
+
+```{r}
+head(res)
+```
+
+
+```{r}
+cgplot = 
+ggplot(res, aes(y=capacity_gain, x = pool_size, group=prob_positive, color = prob_positive)) +
+  theme_minimal() + 
+  geom_line() + 
+  geom_hline(yintercept=1, lty="dotted") + 
+  geom_point(aes(size=best)) +
+  scale_color_gradient(name="Positive rate", 
+                       breaks = ps[seq(1,27,by=5)],
+                       low = "black", high="grey75") +
+  scale_size_discrete(guide="none") +
+  ylab("Expected capacity gain") +
+  xlab("Pool size")
+print(cgplot)
+```
+
+```{r}
+pdf("../results/cgPool.pdf", width=6, height=5)
+print(cgplot)
+dev.off()
+```
+
+
+```{r results='asis'}
+library(knitr)
+kable(subset(res, best))
+```
+
+
+```{r}
+best_pool_matrix = 
+  with(res, 
+       tapply(capacity_gain, 
+              list(prob_positive, pool_size), 
+              max))
+
+bps = data.frame(capacity_gain=apply(best_pool_matrix, 1, max),
+      best_pool_size=as.numeric(colnames(best_pool_matrix)[apply(best_pool_matrix, 1, which.max)]))
+bps$positive_rate = as.numeric(rownames(bps))
+data.frame(pool_size = with(bps, tapply(best_pool_size, best_pool_size, min)),
+           min_positive = with(bps, tapply(positive_rate, best_pool_size, min)),
+           max_positive = with(bps, tapply(positive_rate, best_pool_size, max)),
+           min_capacity_gain = with(bps, tapply(capacity_gain, best_pool_size, min)),
+           max_capacity_gain = with(bps, tapply(capacity_gain, best_pool_size, max)))
+```
+
+```{r}
+gg = ggplot(melt(best_pool_matrix), 
+       aes(fill=value, x=Var1, y=Var2)) + 
+  geom_tile() + 
+  scale_fill_gradient2(low="red", mid="white", high="green", midpoint=1) +
+  geom_text(aes(label=format(value, digits = 2)), size=1.2) +
+  theme_minimal() + 
+  ylab("Pool size")+xlab("Positive rate") + theme(legend.position = "none")
+pdf("../results/posRateVSpoolSize.pdf", width=6, height=5)
+print(gg)
+dev.off()
+print(gg)
+```
+
+
+# Streaming pooling algorithm
+
+Suppose the current pool is of size $i$ and the probability that the pool is poisitve is $p_i$. A new specimen with probability of being positive equal to $p$ is proposed to be added to the pool. The probability that the pool containing these $i+1$ is positive is then $P(p_i, p) = p_i + (1-p_i)*p$. The expected number of tests for the $i+1$ specimens is then $P(p_i, p)(1+i+1) + (1-P(p_i, p)) = 1 + P(p_i, p)(1+i) = 1 + (p_i+(1-p_i)p)(i+1)$
+
+```{r}
+# Capacity gain for a pool test of n specimens with *pool* positive prob pp
+cnp = function(n, pp){
+  n/(1 + n*pp)
+}
+
+# Probability of pool being positive by adding a new specimen with individual probability pi
+# to a pool with *pool* positive probability pp
+add1pool_positive = function(pi, pp){
+  pp + (1-pp)*pi
+}
+
+# Capacity gain by additing a new specimen with individual positvie probability pi 
+# to a pool of n-1 specimens with *pool* positive probability pp
+cnnp = function(pi, pp, n){
+  n / (1 + n * add1pool_positive(pi, pp))
+}
+```
+
+
+```{r}
+pi = 0.05
+p = 0.05
+for(i in 2:10){
+  if(cnp(i-1, p) > cnnp(pi, p, i)){
+    print(i-1)
+    break
+  }
+  p = add1pool_positive(pi, p)
+}
+p
+pool_positive(rep(pi, 5))
+c(4, cnp(4, pool_positive(rep(pi, 4))))
+c(5, cnp(5, pool_positive(rep(pi, 5))))
+c(6, cnp(6, pool_positive(rep(pi, 6))))
+c(7, cnp(7, pool_positive(rep(pi, 7))))
+```
+
+
+
+
+
+
+
